@@ -1,0 +1,162 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the older, still running build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Checks that do not depend on the database: run once.
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          tools: composer:v2
+          coverage: none
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress
+          pnpm install --frozen-lockfile
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      # Also generates the Wayfinder route files that TypeScript needs.
+      - name: Build frontend
+        run: pnpm run build
+
+      - name: Frontend format and lint
+        run: pnpm run check
+
+      - name: TypeScript
+        run: pnpm run types:check
+
+      - name: Pint
+        run: composer lint:check
+
+      - name: Larastan
+        run: composer types:check
+
+  # The Pest suite, once per database, to prove the app is portable.
+  tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - db: pgsql
+            image: postgres:18
+            port: 5432
+            health-cmd: pg_isready -U staysync -d staysync_test
+          - db: mysql
+            image: mysql:8.4
+            port: 3306
+            health-cmd: mysqladmin ping -h 127.0.0.1 -u root -psecret
+
+    name: tests (${{ matrix.db }})
+
+    # One service per run. Each image reads only its own variables,
+    # so the Postgres image ignores the MYSQL_* ones and vice versa.
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_DB: staysync_test
+          POSTGRES_USER: staysync
+          POSTGRES_PASSWORD: secret
+          MYSQL_DATABASE: staysync_test
+          MYSQL_USER: staysync
+          MYSQL_PASSWORD: secret
+          MYSQL_ROOT_PASSWORD: secret
+        ports:
+          - ${{ matrix.port }}:${{ matrix.port }}
+        options: >-
+          --health-cmd "${{ matrix.health-cmd }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Real environment variables win over the <env> values in phpunit.xml,
+    # so these switch the suite to the matrix database.
+    env:
+      DB_CONNECTION: ${{ matrix.db }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.port }}
+      DB_DATABASE: staysync_test
+      DB_USERNAME: staysync
+      DB_PASSWORD: secret
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          tools: composer:v2
+          extensions: pdo_pgsql, pdo_mysql
+          coverage: none
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress
+          pnpm install --frozen-lockfile
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      # Page tests render the Blade layout, which needs the Vite manifest.
+      - name: Build frontend
+        run: pnpm run build
+
+      - name: Pest
+        run: php artisan test

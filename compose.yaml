@@ -1,0 +1,40 @@
+# Local services for StaySync. PHP runs natively through Herd;
+# only the stateful services run in Docker.
+# Start: docker compose up -d   Stop: docker compose down
+
+services:
+    pgsql:
+        image: postgres:18-alpine
+        environment:
+            POSTGRES_DB: staysync
+            POSTGRES_USER: staysync
+            POSTGRES_PASSWORD: secret
+        ports:
+            # Host port 5433, because a Homebrew Postgres already uses 5432 on this Mac.
+            - '${FORWARD_DB_PORT:-5433}:5432'
+        volumes:
+            # Postgres 18 images keep data under /var/lib/postgresql/18, so mount the parent.
+            - pgsql-data:/var/lib/postgresql
+            # First-boot script that creates the separate test database.
+            - ./docker/pgsql/create-test-database.sql:/docker-entrypoint-initdb.d/10-create-test-database.sql:ro
+        healthcheck:
+            test: ['CMD', 'pg_isready', '-U', 'staysync', '-d', 'staysync']
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+    redis:
+        image: redis:8-alpine
+        ports:
+            - '${FORWARD_REDIS_PORT:-6379}:6379'
+        volumes:
+            - redis-data:/data
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+volumes:
+    pgsql-data:
+    redis-data:
